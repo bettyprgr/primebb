@@ -128,6 +128,23 @@ class DB:
                   message TEXT NOT NULL,
                   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+
+                CREATE TABLE IF NOT EXISTS amazon_accounts (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  phone TEXT NOT NULL UNIQUE,
+                  sms_url TEXT NOT NULL,
+                  name TEXT,
+                  password TEXT,
+                  proxy_url TEXT,
+                  proxy_region TEXT,
+                  bitbrowser_id TEXT,
+                  status TEXT NOT NULL DEFAULT 'pending',
+                  message TEXT,
+                  check_after_at TEXT,
+                  last_checked_at TEXT,
+                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
                 """
             )
             conn.commit()
@@ -215,6 +232,23 @@ class DB:
             cursor = conn.execute("DELETE FROM accounts WHERE id = ?", (account_id,))
             conn.commit()
             return cursor.rowcount > 0
+
+    @staticmethod
+    def delete_accounts_bulk(account_ids: list[int]) -> int:
+        if not account_ids:
+            return 0
+        placeholders = ",".join("?" * len(account_ids))
+        with _lock, DB.session() as conn:
+            cursor = conn.execute(f"DELETE FROM accounts WHERE id IN ({placeholders})", account_ids)
+            conn.commit()
+            return cursor.rowcount
+
+    @staticmethod
+    def delete_all_accounts() -> int:
+        with _lock, DB.session() as conn:
+            cursor = conn.execute("DELETE FROM accounts")
+            conn.commit()
+            return cursor.rowcount
 
     @staticmethod
     def save_browser_profile(account_id: int, bitbrowser_id: str, config: dict[str, Any] | None, template_browser_id: str | None = None, status: str = "created") -> dict[str, Any]:
@@ -355,3 +389,79 @@ class DB:
                 (task_id, account_id, service, level, event_type, message),
             )
             conn.commit()
+
+    # ── Amazon accounts ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def upsert_amazon_account(data: dict[str, Any]) -> dict[str, Any]:
+        phone = (data.get("phone") or "").strip()
+        if not phone:
+            raise ValueError("phone is required")
+        fields = ["sms_url", "name", "password", "proxy_url", "proxy_region", "bitbrowser_id", "status", "message", "check_after_at", "last_checked_at"]
+        with _lock, DB.session() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM amazon_accounts WHERE phone = ?", (phone,))
+            exists = cursor.fetchone()
+            if exists:
+                updates, values = [], []
+                for field in fields:
+                    if field in data:
+                        updates.append(f"{field} = ?")
+                        values.append(data[field])
+                if updates:
+                    updates.append("updated_at = CURRENT_TIMESTAMP")
+                    values.append(phone)
+                    cursor.execute(f"UPDATE amazon_accounts SET {', '.join(updates)} WHERE phone = ?", values)
+            else:
+                insert_fields = ["phone"] + [f for f in fields if f in data]
+                placeholders = ", ".join("?" for _ in insert_fields)
+                values = [phone] + [data.get(f) for f in insert_fields[1:]]
+                cursor.execute(f"INSERT INTO amazon_accounts ({', '.join(insert_fields)}) VALUES ({placeholders})", values)
+            conn.commit()
+        row = DB.get_amazon_account_by_phone(phone)
+        if not row:
+            raise RuntimeError("amazon account upsert failed")
+        return row
+
+    @staticmethod
+    def get_amazon_account(account_id: int) -> dict[str, Any] | None:
+        with _lock, DB.session() as conn:
+            row = conn.execute("SELECT * FROM amazon_accounts WHERE id = ?", (account_id,)).fetchone()
+            return DB.row_to_dict(row)
+
+    @staticmethod
+    def get_amazon_account_by_phone(phone: str) -> dict[str, Any] | None:
+        with _lock, DB.session() as conn:
+            row = conn.execute("SELECT * FROM amazon_accounts WHERE phone = ?", (phone,)).fetchone()
+            return DB.row_to_dict(row)
+
+    @staticmethod
+    def list_amazon_accounts() -> list[dict[str, Any]]:
+        with _lock, DB.session() as conn:
+            rows = conn.execute("SELECT * FROM amazon_accounts ORDER BY id DESC").fetchall()
+            return [dict(row) for row in rows]
+
+    @staticmethod
+    def delete_amazon_account(account_id: int) -> bool:
+        with _lock, DB.session() as conn:
+            cursor = conn.execute("DELETE FROM amazon_accounts WHERE id = ?", (account_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+
+    @staticmethod
+    def delete_amazon_accounts_bulk(account_ids: list[int]) -> int:
+        if not account_ids:
+            return 0
+        placeholders = ",".join("?" * len(account_ids))
+        with _lock, DB.session() as conn:
+            cursor = conn.execute(f"DELETE FROM amazon_accounts WHERE id IN ({placeholders})", account_ids)
+            conn.commit()
+            return cursor.rowcount
+
+    @staticmethod
+    def list_amazon_accounts_pending_check() -> list[dict[str, Any]]:
+        with _lock, DB.session() as conn:
+            rows = conn.execute(
+                "SELECT * FROM amazon_accounts WHERE status = 'created' AND check_after_at IS NOT NULL AND check_after_at <= CURRENT_TIMESTAMP"
+            ).fetchall()
+            return [dict(row) for row in rows]

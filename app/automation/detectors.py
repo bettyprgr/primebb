@@ -78,13 +78,26 @@ async def service_success(page, service: str) -> bool:
     if service == "youtube":
         return "youtube.com" in url and await find_visible(page, ['button#avatar-btn', '#avatar-btn', 'a[href*="SignOutOptions"]']) is not None
     if service == "reddit":
-        return "reddit.com" in url and any(token in text for token in ["create post", "advertise", "chat"])
+        return "reddit.com" in url and (
+            any(token in text for token in ["create post", "advertise", "chat", "popular", "all"]) or
+            await find_visible(page, ['[aria-label*="profile" i]', 'a[href*="/user/"]', 'button[id*="USER_DROPDOWN"]', '[data-testid*="user" i]']) is not None
+        )
     if service == "quora":
-        return "quora.com" in url and any(token in text for token in ["add question", "answer", "following"])
+        return "quora.com" in url and any(token in text for token in ["add question", "answer", "following", "spaces", "notifications"])
     if service == "x":
-        return ("x.com" in url or "twitter.com" in url) and any(token in text for token in ["home", "post", "messages"])
+        if "x.com" not in url and "twitter.com" not in url:
+            return False
+        if "/login" in url or "/i/flow" in url:
+            return False
+        logged_in = await find_visible(page, [
+            '[data-testid="SideNav_AccountSwitcher_Button"]',
+            '[data-testid="AppTabBar_Home_Link"]',
+            '[aria-label="Home"][role="link"]',
+            '[data-testid="primaryColumn"]',
+        ])
+        return logged_in is not None
     if service == "ebay":
-        return "ebay." in url and any(token in text for token in ["my ebay", "watchlist", "summary"])
+        return "ebay." in url and any(token in text for token in ["my ebay", "watchlist", "summary", "sign out", "hi,"])
     return False
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import random
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -11,7 +12,7 @@ from app.schemas import AutomationResult
 
 Callback = Callable[[str, str], Awaitable[None] | None]
 
-SUPPORTED_SERVICES = ["youtube", "quora", "reddit", "x", "ebay"]
+SUPPORTED_SERVICES = ["youtube", "reddit", "x", "ebay"]
 
 SERVICE_CONFIGS = {
     "youtube": {
@@ -39,7 +40,7 @@ SERVICE_CONFIGS = {
         "start_url": "https://x.com/i/flow/login",
         "home_url": "https://x.com/home",
         "login_selectors": [],
-        "google_selectors": ['div[role="button"]:has-text("Google")', 'span:has-text("Sign in with Google")', '[data-testid*="google" i]', 'iframe[src*="accounts.google"]'],
+        "google_selectors": ['div[role="button"][aria-label*="Google" i]', 'iframe[src*="accounts.google.com/gsi/button"] ~ div[role="button"]', 'iframe[src*="accounts.google"]'],
         "logout_url": "https://x.com/logout",
         "logout_selectors": ['div[role="button"]:has-text("Log out")', '[data-testid="confirmationSheetConfirm"]'],
     },
@@ -76,12 +77,12 @@ async def _click_first(page, selectors: list[str]) -> bool:
     return False
 
 
-async def _click_first_with_popup(page, selectors: list[str]) -> tuple[bool, Any]:
+async def _click_first_with_popup(page, selectors: list[str], popup_timeout: int = 15000) -> tuple[bool, Any]:
     locator = await find_visible(page, selectors, timeout=3000) if selectors else None
     if not locator:
         return False, page
     try:
-        async with page.expect_popup(timeout=5000) as popup_info:
+        async with page.expect_popup(timeout=popup_timeout) as popup_info:
             await locator.click(force=True)
         popup = await popup_info.value
         try:
@@ -186,6 +187,71 @@ async def _complete_ebay_registration_if_present(page) -> bool:
     return clicked
 
 
+async def _skip_ebay_phone_if_present(page) -> bool:
+    try:
+        text = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return False
+    if not any(p in text.lower() for p in ["phone number", "add phone", "verify phone", "phone verification"]):
+        return False
+    clicked = await _click_first(page, [
+        'button:has-text("Skip")',
+        'button:has-text("Not now")',
+        'button:has-text("Maybe later")',
+        'a:has-text("Skip")',
+        '[aria-label*="Skip" i]',
+    ])
+    if clicked:
+        await asyncio.sleep(2)
+    return clicked
+
+
+async def _complete_x_birthday_if_present(page) -> bool:
+    try:
+        text = await page.locator("body").inner_text(timeout=3000)
+    except Exception:
+        return False
+    if not any(p in text.lower() for p in ["date of birth", "birthday", "birth date", "ngày sinh"]):
+        return False
+    month = random.randint(1, 12)
+    day = random.randint(1, 28)
+    year = random.randint(1970, 2005)
+    # X uses <select> dropdowns for month/day/year
+    for sel, val in [
+        ('select[data-testid="date_picker_month"]', str(month)),
+        ('select[data-testid="date_picker_day"]', str(day)),
+        ('select[data-testid="date_picker_year"]', str(year)),
+    ]:
+        try:
+            locator = page.locator(sel).first
+            if await locator.count() > 0:
+                await locator.select_option(str(val))
+                await asyncio.sleep(0.5)
+        except Exception:
+            pass
+    # Fallback: try generic selects in order
+    try:
+        selects = page.locator("select")
+        count = await selects.count()
+        if count >= 3:
+            for idx, val in enumerate([str(month), str(day), str(year)]):
+                try:
+                    await selects.nth(idx).select_option(val)
+                    await asyncio.sleep(0.3)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    await _click_first(page, [
+        'button:has-text("Sign up")',
+        'button:has-text("Next")',
+        'button:has-text("Continue")',
+        '[data-testid="ocfEnterTextNextButton"]',
+    ])
+    await asyncio.sleep(2)
+    return True
+
+
 async def login_service_with_google(page, service: str, account: dict, callback: Callback | None = None) -> AutomationResult:
     if service not in SERVICE_CONFIGS:
         return AutomationResult(success=False, status="unsupported", message=f"unsupported service: {service}")
@@ -205,11 +271,23 @@ async def login_service_with_google(page, service: str, account: dict, callback:
     await _click_first(page, config.get("login_selectors", []))
     await asyncio.sleep(2)
 
+    await _emit(callback, "info", f"looking for google button on {service} (url={page.url[:60]})")
     clicked_google, auth_page = await _click_first_with_popup(page, config.get("google_selectors", []))
+    await _emit(callback, "info", f"google button click: clicked={clicked_google} popup={'yes' if auth_page != page else 'no'} url={page.url[:60]}")
     if clicked_google and auth_page == page and "accounts.google" not in page.url:
+        # Some services (X) navigate the main page to accounts.google.com instead of opening a popup
+        # Wait up to 8s for the page to navigate there
+        try:
+            await page.wait_for_url("**/accounts.google.com/**", timeout=8000)
+            await _emit(callback, "info", f"page navigated to google (url={page.url[:60]})")
+        except Exception:
+            pass
+    if clicked_google and auth_page == page and "accounts.google" not in page.url:
+        await _emit(callback, "info", "no popup detected, checking for google iframe")
         iframe_clicked, iframe_auth_page = await _click_google_iframe_with_popup(page)
         if iframe_clicked:
             auth_page = iframe_auth_page
+            await _emit(callback, "info", f"iframe click: popup={'yes' if auth_page != page else 'no'}")
     if not clicked_google and service == "youtube":
         auth = await ensure_google_authenticated(page, account, callback)
         if not auth.success:
@@ -229,22 +307,41 @@ async def login_service_with_google(page, service: str, account: dict, callback:
         return AutomationResult(success=False, status="unsupported", message=f"Google login button not found for {service}", data={"url": page.url})
 
     await asyncio.sleep(3)
+    await _emit(callback, "info", f"choosing google account on auth_page (url={auth_page.url[:60]})")
     await _choose_google_account_if_present(auth_page, account.get("email") or "")
-    auth = await ensure_google_authenticated(auth_page, account, callback, navigate=False)
+    await _emit(callback, "info", "calling ensure_google_authenticated")
+    try:
+        auth = await asyncio.wait_for(
+            ensure_google_authenticated(auth_page, account, callback, navigate=False),
+            timeout=120.0,
+        )
+    except asyncio.TimeoutError:
+        return AutomationResult(success=False, status="google_auth_failed", message="Google auth timed out after 120s")
     if not auth.success:
         return auth
     if not auth_page.is_closed():
         await _continue_oauth_if_present(auth_page)
     await asyncio.sleep(5)
+
+    # Handle post-auth registration/onboarding steps
+    if service == "x":
+        await _complete_x_birthday_if_present(page)
     if service == "ebay" and await _complete_ebay_registration_if_present(page):
         manual = await detect_manual_verification(page)
         if manual:
             return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
         if await service_success(page, service):
             return AutomationResult(success=True, status="success", message="ebay login succeeded")
+    if service == "ebay":
+        await _skip_ebay_phone_if_present(page)
+
     if config.get("home_url"):
         await _goto(page, config["home_url"])
         await asyncio.sleep(5)
+
+    # X birthday may appear after redirect to home
+    if service == "x":
+        await _complete_x_birthday_if_present(page)
 
     manual = await detect_manual_verification(page)
     if manual:

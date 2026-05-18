@@ -89,6 +89,7 @@ class ImportAccountsRequest(BaseModel):
 class ImportAccountsResponse(BaseModel):
     imported: int
     errors: list[str] = Field(default_factory=list)
+    account_ids: list[int] = Field(default_factory=list)
 
 
 class BrowserEnsureRequest(BaseModel):
@@ -109,6 +110,7 @@ class TaskCreateRequest(BaseModel):
     close_after: bool = False
     concurrency: int = 1
     template_browser_id: str | None = None
+    proxy_urls: list[str] = Field(default_factory=list)
 
 
 class TaskProgress(BaseModel):

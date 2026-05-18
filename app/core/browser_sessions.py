@@ -12,19 +12,23 @@ class BrowserSessionManager:
     def __init__(self) -> None:
         self.client = BitBrowserClient()
 
-    def ensure_browser_for_account(self, account_id: int, template_browser_id: str | None = None, rotate_proxy: bool = False) -> dict[str, Any]:
+    def ensure_browser_for_account(self, account_id: int, template_browser_id: str | None = None, rotate_proxy: bool = False, proxy_url_override: str | None = None) -> dict[str, Any]:
         account = DB.get_account(account_id)
         if not account:
             raise ValueError("account not found")
 
-        proxy_url, ssid, proxy_country, saved_region_slug = build_proxy_url(account, rotate=rotate_proxy)
-        DB.upsert_account({
-            "email": account["email"],
-            "proxy_url": proxy_url,
-            "proxy_ssid": ssid,
-            "proxy_country": proxy_country,
-            "proxy_region_slug": saved_region_slug,
-        })
+        if proxy_url_override:
+            proxy_url = proxy_url_override
+            DB.upsert_account({"email": account["email"], "proxy_url": proxy_url})
+        else:
+            proxy_url, ssid, proxy_country, saved_region_slug = build_proxy_url(account, rotate=rotate_proxy)
+            DB.upsert_account({
+                "email": account["email"],
+                "proxy_url": proxy_url,
+                "proxy_ssid": ssid,
+                "proxy_country": proxy_country,
+                "proxy_region_slug": saved_region_slug,
+            })
         account = DB.get_account(account_id) or account
 
         profile_row = DB.get_browser_profile_by_account(account_id)

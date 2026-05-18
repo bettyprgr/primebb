@@ -1,5 +1,6 @@
 import asyncio
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable
 
 from app.automation.detectors import detect_google_logged_in, detect_invalid_credentials, detect_manual_verification, find_visible
@@ -95,8 +96,55 @@ async def _handle_totp(page, secret: str | None, callback: Callback | None) -> A
     await code_input.fill(code)
     await _click_text(page, ["Next", "Verify", "Continue"])
     await _emit(callback, "info", "submitted TOTP challenge")
-    await asyncio.sleep(3)
+    await asyncio.sleep(6)
     return None
+
+
+async def _click_oauth_allow(page) -> bool:
+    """Click Allow/Continue/I agree on Google OAuth consent screen using multiple strategies."""
+    # Try button by text
+    for label in ["Allow", "Continue", "I agree", "Yes"]:
+        try:
+            btn = page.get_by_role("button", name=re.compile(re.escape(label), re.I)).first
+            if await btn.count() > 0 and await btn.is_visible():
+                await btn.click()
+                return True
+        except Exception:
+            pass
+    # Try by selector — Google consent uses specific data-action or jsname attributes
+    for selector in [
+        'button[data-action="allow"]',
+        'button[jsname="LgbsSe"]',
+        'button[jsname="tHlp8d"]',
+        '#submit_approve_access',
+        'input[value="Allow"]',
+        'button:has-text("Allow")',
+        'div[role="button"]:has-text("Allow")',
+    ]:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() > 0 and await locator.is_visible():
+                await locator.click(force=True)
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _wait_for_popup_redirect(page, timeout: float = 15.0) -> bool:
+    """Wait until popup navigates away from accounts.google.com or closes."""
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if page.is_closed():
+                return True
+            if "accounts.google" not in page.url:
+                return True
+        except Exception:
+            return True
+        await asyncio.sleep(0.5)
+    return False
 
 
 async def ensure_google_authenticated(page, account: dict, callback: Callback | None = None, navigate: bool = True) -> AutomationResult:
@@ -135,31 +183,80 @@ async def ensure_google_authenticated(page, account: dict, callback: Callback | 
         await _click_text(page, ["Next"])
         await asyncio.sleep(3)
 
-    for _ in range(8):
+    for i in range(10):
+        try:
+            current_url = page.url
+        except Exception:
+            return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
+
+        await _emit(callback, "info", f"auth loop {i+1}/10 url={current_url[:80]}")
+
+        try:
+            if not navigate and page.is_closed():
+                return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
+            if not navigate and "accounts.google" not in current_url:
+                return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
+        except Exception:
+            return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
+
+        if await detect_invalid_credentials(page):
+            return AutomationResult(success=False, status="invalid_credentials", message="Google rejected the email or password")
+
+        # If stuck on account chooser, try clicking the account or fall back to email input
+        if "accountchooser" in current_url or "signinchooser" in current_url:
+            if i < 3:
+                await _choose_account_or_use_another(page, account.get("email"))
+            else:
+                # Fallback: click "Use another account" to reach email input
+                await _click_text(page, ["Use another account", "Add account", "Sign in with a different account"])
+                await asyncio.sleep(2)
+                email_input = await find_visible(page, ['input[type="email"]', 'input[name="identifier"]'], timeout=4000)
+                if email_input:
+                    await email_input.fill(account.get("email") or "")
+                    await _click_text(page, ["Next"])
+                    await asyncio.sleep(3)
+            await asyncio.sleep(2)
+            continue
+
+        totp_result = await _handle_totp(page, account.get("totp_secret"), callback)
+        if totp_result:
+            return totp_result
+
+        manual = await detect_manual_verification(page)
+        if manual:
+            return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
+
+        await _handle_recovery_email(page, account.get("recovery_email"), callback)
+
+        password_input = await find_visible(page, ['input[type="password"]', 'input[name="Passwd"]'])
+        if password_input:
+            await password_input.fill(account.get("password") or "")
+            await _click_text(page, ["Next"])
+            await asyncio.sleep(3)
+
+        if not navigate:
+            clicked = await _click_oauth_allow(page)
+            if clicked:
+                await _emit(callback, "info", f"clicked oauth consent, waiting for redirect (url={current_url[:80]})")
+                redirected = await _wait_for_popup_redirect(page, timeout=20.0)
+                if redirected:
+                    return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
+
+        await _click_text(page, ["Not now", "Skip", "Cancel"])
+
+        if await detect_google_logged_in(page):
+            return AutomationResult(success=True, status="google_authenticated", message="Google authentication succeeded")
+
+        await asyncio.sleep(2)
+
+    try:
         if not navigate and page.is_closed():
             return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
         if not navigate and "accounts.google" not in page.url:
             return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
-        if await detect_invalid_credentials(page):
-            return AutomationResult(success=False, status="invalid_credentials", message="Google rejected the email or password")
-        totp_result = await _handle_totp(page, account.get("totp_secret"), callback)
-        if totp_result:
-            return totp_result
-        manual = await detect_manual_verification(page)
-        if manual:
-            return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
-        await _handle_recovery_email(page, account.get("recovery_email"), callback)
-        if not navigate:
-            await _click_text(page, ["Continue", "Allow", "I agree"])
-        await _click_text(page, ["Not now", "Skip"])
-        if await detect_google_logged_in(page):
-            return AutomationResult(success=True, status="google_authenticated", message="Google authentication succeeded")
-        await asyncio.sleep(2)
+    except Exception:
+        return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
 
-    if not navigate and page.is_closed():
-        return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
-    if not navigate and "accounts.google" not in page.url:
-        return AutomationResult(success=True, status="google_authenticated", message="Google OAuth authentication completed")
     if await detect_google_logged_in(page):
         return AutomationResult(success=True, status="google_authenticated", message="Google authentication succeeded")
     return AutomationResult(success=False, status="google_auth_failed", message="Google authentication did not complete", data={"url": page.url})

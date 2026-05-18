@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from app.db import DB
 from app.schemas import Account, AccountCreate, AccountListResponse, AccountUpdate, ImportAccountsRequest, ImportAccountsResponse
@@ -49,17 +50,19 @@ def create_account(data: AccountCreate):
 def import_accounts(data: ImportAccountsRequest):
     imported = 0
     errors: list[str] = []
+    account_ids: list[int] = []
     for index, raw_line in enumerate(data.content.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
         try:
             account = parse_pipe_account_line(line)
-            DB.upsert_account(account)
+            saved = DB.upsert_account(account)
+            account_ids.append(saved["id"])
             imported += 1
         except Exception as exc:
             errors.append(f"line {index}: {exc}")
-    return {"imported": imported, "errors": errors}
+    return {"imported": imported, "errors": errors, "account_ids": account_ids}
 
 
 @router.get("/{account_id}", response_model=Account)
@@ -87,3 +90,19 @@ def delete_account(account_id: int):
     if not DB.delete_account(account_id):
         raise HTTPException(status_code=404, detail="account not found")
     return {"message": "deleted"}
+
+
+class BulkDeleteRequest(BaseModel):
+    account_ids: list[int]
+
+
+@router.post("/bulk-delete")
+def bulk_delete_accounts(data: BulkDeleteRequest):
+    deleted = DB.delete_accounts_bulk(data.account_ids)
+    return {"deleted": deleted}
+
+
+@router.delete("")
+def delete_all_accounts():
+    deleted = DB.delete_all_accounts()
+    return {"deleted": deleted}

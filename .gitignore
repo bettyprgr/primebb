@@ -18,12 +18,18 @@ venv/
 
 # Local Claude/session files
 .claude/
+.playwright-mcp/
 
 # Runtime data
 data/
 *.sqlite
 *.sqlite3
 *.db
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
 
 # OS/editor
 .DS_Store

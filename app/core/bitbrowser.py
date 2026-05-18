@@ -103,15 +103,18 @@ class BitBrowserClient:
 
         excluded = {"id", "name", "remark", "userName", "password", "faSecretKey", "createTime", "updateTime"}
         payload = {key: value for key, value in template.items() if key not in excluded}
-        payload.update(bitbrowser_proxy_fields(proxy_url))
+        if proxy_url:
+            payload.update(bitbrowser_proxy_fields(proxy_url))
         payload["name"] = account.get("email") or "gmail-account"
         payload["userName"] = account.get("email") or ""
         payload["password"] = account.get("password") or ""
         payload["remark"] = self._build_remark(account)
         if account.get("totp_secret"):
             payload["faSecretKey"] = account["totp_secret"]
+        payload["enableSocks5Udp"] = True
         payload.setdefault("browserFingerPrint", {})
-        payload["browserFingerPrint"]["coreVersion"] = payload["browserFingerPrint"].get("coreVersion") or "140"
+        payload["browserFingerPrint"]["coreVersion"] = "146"
+        payload["browserFingerPrint"]["webRTC"] = 1  # Allow
         payload["randomFingerprint"] = True
         payload["isRandomFinger"] = True
         response = self._request("/browser/update", payload, timeout=15)

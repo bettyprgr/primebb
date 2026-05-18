@@ -54,6 +54,11 @@ class TaskRunner:
 
     def _run_task(self, task_id: str, request: TaskCreateRequest) -> None:
         account_ids = list(dict.fromkeys(request.account_ids))
+        proxy_map: dict[int, str] = {}
+        if request.proxy_urls:
+            for i, account_id in enumerate(account_ids):
+                if i < len(request.proxy_urls):
+                    proxy_map[account_id] = request.proxy_urls[i]
         concurrency = max(1, min(request.concurrency, get_settings().max_task_concurrency))
         DB.update_task(task_id, status=TaskStatus.running.value, message="running")
         _emit(manager.task_progress(DB.get_task(task_id) or {}))
@@ -62,7 +67,7 @@ class TaskRunner:
         stats_lock = threading.Lock()
 
         def process(account_id: int) -> str:
-            status = self._process_account(task_id, request, account_id)
+            status = self._process_account(task_id, request, account_id, proxy_map.get(account_id))
             with stats_lock:
                 if status == "success":
                     stats["completed"] += 1
@@ -97,7 +102,7 @@ class TaskRunner:
         DB.update_task(task_id, status=final_status, message="finished")
         _emit(manager.task_progress(DB.get_task(task_id) or {}))
 
-    def _process_account(self, task_id: str, request: TaskCreateRequest, account_id: int) -> str:
+    def _process_account(self, task_id: str, request: TaskCreateRequest, account_id: int, proxy_url_override: str | None = None) -> str:
         with _account_lock(account_id):
             account = DB.get_account(account_id)
             if not account:
@@ -106,7 +111,7 @@ class TaskRunner:
             DB.update_task_item(task_id, account_id, "running", "running")
             _emit(manager.account_progress({"task_id": task_id, "account_id": account_id, "status": "running"}))
             try:
-                result = asyncio.run(self._run_account_async(task_id, request, account))
+                result = asyncio.run(self._run_account_async(task_id, request, account, proxy_url_override))
                 DB.update_task_item(task_id, account_id, result, result)
                 _emit(manager.account_progress({"task_id": task_id, "account_id": account_id, "status": result}))
                 return result
@@ -116,12 +121,13 @@ class TaskRunner:
                 log_event(task_id, account_id, None, "error", "account_error", str(exc))
                 return "failed"
 
-    async def _run_account_async(self, task_id: str, request: TaskCreateRequest, account: dict[str, Any]) -> str:
+    async def _run_account_async(self, task_id: str, request: TaskCreateRequest, account: dict[str, Any], proxy_url_override: str | None = None) -> str:
         browser_manager = BrowserSessionManager()
         ensured = browser_manager.ensure_browser_for_account(
             account["id"],
             template_browser_id=request.template_browser_id,
             rotate_proxy=False,
+            proxy_url_override=proxy_url_override,
         )
         browser_id = ensured["browser_id"]
         open_data = browser_manager.open_browser(browser_id)

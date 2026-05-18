@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     proxy_port: int = 17521
     proxy_session_ttl: int = 10
     max_task_concurrency: int = 3
+    twocaptcha_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
