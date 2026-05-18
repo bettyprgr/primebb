@@ -15,4 +15,5 @@ def get_config():
         "proxy_port": settings.proxy_port,
         "proxy_username_prefix": settings.proxy_username_prefix,
         "proxy_session_ttl": settings.proxy_session_ttl,
+        "delete_browser_after_complete": settings.delete_browser_after_complete,
     }

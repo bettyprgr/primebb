@@ -85,6 +85,12 @@ th { color: #94a3b8; font-size: 12px; text-transform: uppercase; letter-spacing:
 .sp-log-scroll { max-height: 260px; overflow-y: auto; background: rgba(2,6,23,0.5); border-radius: 12px; padding: 12px; }
 .sp-done { display: flex; flex-direction: column; gap: 14px; }
 
+/* Tab bar */
+.tab-bar { display: flex; gap: 4px; border-bottom: 1px solid #1e293b; margin-bottom: 4px; }
+.tab-btn { background: none; border: none; border-bottom: 2px solid transparent; color: #94a3b8; cursor: pointer; font-size: 14px; padding: 8px 16px; margin-bottom: -1px; transition: color 0.15s, border-color 0.15s; }
+.tab-btn:hover { color: #e2e8f0; }
+.tab-active { color: #e2e8f0; border-bottom-color: #6366f1; }
+
 @media (max-width: 1200px) {
   body { min-width: 0; }
   .app-shell { flex-direction: column; }

@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.core.amazon_runner import amazon_task_runner
+from app.core.proxies import build_proxy_url, state_full_name
 from app.db import DB
 
 router = APIRouter(prefix="/api/amazon")
@@ -10,13 +11,23 @@ def _parse_phone_line(line: str) -> dict | None:
     line = line.strip()
     if not line or line.startswith("#"):
         return None
-    parts = line.split("|", 1)
-    if len(parts) != 2:
+    parts = line.split("|")
+    if len(parts) < 2:
         return None
     phone, sms_url = parts[0].strip(), parts[1].strip()
     if not phone or not sms_url:
         return None
-    return {"phone": phone, "sms_url": sms_url}
+    result: dict = {"phone": phone, "sms_url": sms_url}
+    if len(parts) >= 3 and parts[2].strip():
+        result["name"] = parts[2].strip()
+    if len(parts) >= 4 and parts[3].strip():
+        abbr = parts[3].strip().upper()
+        full = state_full_name(abbr)
+        if full:
+            proxy_url, _, _, _ = build_proxy_url({"proxy_state_region": full, "country": "US"}, rotate=True)
+            result["proxy_url"] = proxy_url
+            result["proxy_region"] = abbr
+    return result
 
 
 @router.post("/phones/import")
@@ -51,6 +62,20 @@ def delete_account(account_id: int):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="not found")
     return {"ok": True}
+
+
+@router.patch("/accounts/{account_id}")
+def update_account(account_id: int, body: dict):
+    account = DB.get_amazon_account(account_id)
+    if not account:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="not found")
+    payload: dict = {"phone": account["phone"]}
+    if "status" in body:
+        payload["status"] = body["status"]
+    if "message" in body:
+        payload["message"] = body["message"]
+    return DB.upsert_amazon_account(payload)
 
 
 @router.post("/accounts/bulk-delete")

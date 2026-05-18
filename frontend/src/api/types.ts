@@ -67,6 +67,7 @@ export type ConfigResponse = {
   proxy_port: number;
   proxy_username_prefix: string;
   proxy_session_ttl: number;
+  delete_browser_after_complete: boolean;
 };
 
 export type ServiceLogin = {

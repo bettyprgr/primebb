@@ -86,6 +86,9 @@ class BitBrowserClient:
     def close_profile(self, browser_id: str) -> None:
         self._request("/browser/close", {"id": browser_id}, timeout=10)
 
+    def autopaste(self, browser_id: str, url: str) -> dict[str, Any]:
+        return self._request("/autopaste", {"browserId": browser_id, "url": url}, timeout=10)
+
     def delete_profile(self, browser_id: str) -> None:
         self._request("/browser/delete", {"id": browser_id}, timeout=10)
 

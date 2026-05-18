@@ -1,12 +1,32 @@
 import { useEffect, useState } from "react";
 import { useOutletContext } from "react-router-dom";
-import { createAmazonTask, deleteAmazonAccount, importPhones, listAmazonAccounts } from "../../api/amazon";
+import { createAmazonTask, importPhones, listAmazonAccounts } from "../../api/amazon";
 import type { AmazonAccount } from "../../api/amazon";
 import type { usePrimeBbWebSocket } from "../../api/websocket";
-import { Badge, statusTone } from "../../components/Badge";
+import { Badge } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
 import { Field, Textarea, TextInput } from "../../components/Field";
+
+const STATE_ABBREV: Record<string, string> = {
+  Alabama: "AL", Alaska: "AK", Arizona: "AZ", Arkansas: "AR", California: "CA",
+  Colorado: "CO", Connecticut: "CT", Delaware: "DE", Florida: "FL", Georgia: "GA",
+  Hawaii: "HI", Idaho: "ID", Illinois: "IL", Indiana: "IN", Iowa: "IA",
+  Kansas: "KS", Kentucky: "KY", Louisiana: "LA", Maine: "ME", Maryland: "MD",
+  Massachusetts: "MA", Michigan: "MI", Minnesota: "MN", Mississippi: "MS",
+  Missouri: "MO", Montana: "MT", Nebraska: "NE", Nevada: "NV",
+  "New Hampshire": "NH", "New Jersey": "NJ", "New Mexico": "NM", "New York": "NY",
+  "North Carolina": "NC", "North Dakota": "ND", Ohio: "OH", Oklahoma: "OK",
+  Oregon: "OR", Pennsylvania: "PA", "Rhode Island": "RI", "South Carolina": "SC",
+  "South Dakota": "SD", Tennessee: "TN", Texas: "TX", Utah: "UT",
+  Vermont: "VT", Virginia: "VA", Washington: "WA", "West Virginia": "WV",
+  Wisconsin: "WI", Wyoming: "WY",
+};
+
+function abbrevRegion(r?: string | null): string {
+  if (!r) return "";
+  return STATE_ABBREV[r] || r;
+}
 
 type Phase = "idle" | "running" | "done";
 
@@ -16,13 +36,11 @@ export function AmazonCreationWorkspace() {
   const [phonesText, setPhonesText] = useState("");
   const [proxiesText, setProxiesText] = useState("");
   const [templateBrowserId, setTemplateBrowserId] = useState("");
-  const [concurrency, setConcurrency] = useState(1);
+  const [concurrency, setConcurrency] = useState(3);
   const [phase, setPhase] = useState<Phase>("idle");
   const [taskId, setTaskId] = useState<string | null>(null);
-  const [importedIds, setImportedIds] = useState<number[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<AmazonAccount[]>([]);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
 
   function loadAccounts() {
     listAmazonAccounts().then((d) => setAccounts(d.items)).catch(() => {});
@@ -30,20 +48,17 @@ export function AmazonCreationWorkspace() {
 
   useEffect(() => { loadAccounts(); }, []);
 
-  // Poll accounts while running, refresh on done
   useEffect(() => {
     if (phase !== "running") return;
     const interval = setInterval(loadAccounts, 5000);
     return () => clearInterval(interval);
   }, [phase]);
 
-  // Detect task completion
   useEffect(() => {
     if (!taskId || phase !== "running") return;
     const task = live.tasks[taskId];
     if (!task) return;
-    const terminal = ["completed", "failed", "partial_manual_required", "cancelled"];
-    if (!terminal.includes(task.status)) return;
+    if (!["completed", "failed", "partial_manual_required", "cancelled", "partial_cancelled"].includes(task.status)) return;
     loadAccounts();
     setPhase("done");
   }, [live.tasks, taskId, phase]);
@@ -66,7 +81,6 @@ export function AmazonCreationWorkspace() {
         setError(imported.errors.length ? imported.errors.join("; ") : "No phones imported.");
         return;
       }
-      setImportedIds(imported.account_ids);
       const created = await createAmazonTask(imported.account_ids, templateBrowserId || null, concurrency, proxyLines.length ? proxyLines : []);
       setTaskId(created.id);
       setPhase("running");
@@ -78,34 +92,15 @@ export function AmazonCreationWorkspace() {
   function reset() {
     setPhase("idle");
     setTaskId(null);
-    setImportedIds([]);
     setError(null);
     setPhonesText("");
     setProxiesText("");
   }
 
-  function toggleSelect(id: number) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  }
-
-  function toggleAll() {
-    if (selected.size === accounts.length) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(accounts.map((a) => a.id)));
-    }
-  }
-
-  async function deleteSelected() {
-    if (!selected.size) return;
-    await Promise.all(Array.from(selected).map((id) => deleteAmazonAccount(id).catch(() => {})));
-    setSelected(new Set());
-    loadAccounts();
-  }
+  const createdAccounts = accounts.filter((a) => a.status === "created");
+  const createdText = createdAccounts
+    .map((a) => `${a.phone}|${a.sms_url}|${a.password ?? ""}|${a.name ?? ""}|${abbrevRegion(a.proxy_region)}|${a.created_at ? a.created_at.slice(0, 10) : ""}`)
+    .join("\n");
 
   return (
     <div className="page-stack">
@@ -121,7 +116,7 @@ export function AmazonCreationWorkspace() {
             <>
               <div className="form-grid" style={{ gridTemplateColumns: "repeat(2, minmax(0,1fr))" }}>
                 <Field label="Concurrency">
-                  <TextInput type="number" min={1} max={3} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} />
+                  <TextInput type="number" min={1} max={10} value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} />
                 </Field>
                 <Field label="Template browser ID">
                   <TextInput value={templateBrowserId} onChange={(e) => setTemplateBrowserId(e.target.value)} placeholder="optional" />
@@ -140,7 +135,7 @@ export function AmazonCreationWorkspace() {
                   <Textarea
                     value={phonesText}
                     onChange={(e) => setPhonesText(e.target.value)}
-                    placeholder={"5136634109|https://sms222.us?token=abc123\n5139876543|https://sms222.us?token=xyz456"}
+                    placeholder={"5136634109|https://sms222.us?token=abc123\n5139876543|https://sms222.us?token=xyz456|John|TX"}
                     style={{ minHeight: 180, fontFamily: "monospace", fontSize: 13 }}
                   />
                 </Field>
@@ -183,57 +178,39 @@ export function AmazonCreationWorkspace() {
 
           {phase === "done" && (
             <div className="sp-done">
-              <p style={{ color: "#86efac", margin: 0 }}>Task completed. See results in the table.</p>
+              <p style={{ color: "#86efac", margin: 0 }}>Task completed.</p>
               <div className="form-actions">
                 <Button onClick={reset}>Run again</Button>
               </div>
             </div>
           )}
         </Card>
-
-        {/* Right: results table */}
-        <Card
-          title="Accounts"
-          description={`${accounts.length} total`}
-          actions={
-            selected.size > 0
-              ? <Button className="button-danger-ghost" onClick={deleteSelected}>Delete {selected.size}</Button>
-              : undefined
-          }
-        >
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th><input type="checkbox" checked={accounts.length > 0 && selected.size === accounts.length} onChange={toggleAll} /></th>
-                  <th>Phone</th>
-                  <th>Name</th>
-                  <th>Password</th>
-                  <th>Region</th>
-                  <th>Status</th>
-                  <th>Last checked</th>
-                </tr>
-              </thead>
-              <tbody>
-                {accounts.length === 0 && (
-                  <tr><td colSpan={7} style={{ color: "#94a3b8", textAlign: "center" }}>No accounts yet</td></tr>
-                )}
-                {accounts.map((a) => (
-                  <tr key={a.id} className={selected.has(a.id) ? "row-selected" : ""}>
-                    <td><input type="checkbox" checked={selected.has(a.id)} onChange={() => toggleSelect(a.id)} /></td>
-                    <td style={{ fontFamily: "monospace" }}>{a.phone}</td>
-                    <td>{a.name ?? <span style={{ color: "#64748b" }}>—</span>}</td>
-                    <td style={{ fontFamily: "monospace", fontSize: 12 }}>{a.password ?? <span style={{ color: "#64748b" }}>—</span>}</td>
-                    <td>{a.proxy_region ?? <span style={{ color: "#64748b" }}>—</span>}</td>
-                    <td><Badge tone={statusTone(a.status)}>{a.status}</Badge></td>
-                    <td style={{ color: "#94a3b8", fontSize: 12 }}>{a.last_checked_at ? a.last_checked_at.slice(0, 16) : "—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </Card>
       </div>
+
+      {/* Full-width created accounts */}
+      <Card
+        title="Created accounts"
+        description={`${createdAccounts.length} created · phone|sms_url|pass|name|region|date_created`}
+      >
+        <textarea
+          readOnly
+          value={createdText}
+          style={{
+            width: "100%",
+            minHeight: 200,
+            fontFamily: "monospace",
+            fontSize: 12,
+            background: "#0f172a",
+            color: "#e2e8f0",
+            border: "1px solid #334155",
+            borderRadius: 6,
+            padding: "10px 12px",
+            resize: "vertical",
+            boxSizing: "border-box",
+          }}
+          placeholder="Created accounts will appear here…"
+        />
+      </Card>
     </div>
   );
 }

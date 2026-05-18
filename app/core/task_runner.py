@@ -139,6 +139,7 @@ class TaskRunner:
             browser = await playwright.chromium.connect_over_cdp(ws)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             page = context.pages[-1] if context.pages else await context.new_page()
+            result = "failed"
             try:
                 try:
                     geo = await verify_proxy_geo(page, account)
@@ -153,11 +154,14 @@ class TaskRunner:
                 google_result = await ensure_google_authenticated(page, DB.get_account(account["id"]) or account, callback)
                 DB.upsert_account({"email": account["email"], "status": google_result.status, "message": google_result.message})
                 if google_result.manual_required:
-                    return "manual_required"
+                    result = "manual_required"
+                    return result
                 if not google_result.success:
-                    return "failed"
+                    result = "failed"
+                    return result
                 if request.type == TaskType.login_gmail:
-                    return "success"
+                    result = "success"
+                    return result
 
                 services = request.services or SUPPORTED_SERVICES
                 for service in services:
@@ -169,16 +173,30 @@ class TaskRunner:
                         log_event(task_id, account["id"], svc, level, "automation", message)
 
                     service_result = await login_service_with_google(page, service, DB.get_account(account["id"]) or account, service_callback)
-                    status = "manual_required" if service_result.manual_required else service_result.status
-                    DB.upsert_service_login(account["id"], service, status, service_result.message)
-                    DB.update_task_item(task_id, account["id"], status, service_result.message, service)
-                    _emit(manager.service_progress({"task_id": task_id, "account_id": account["id"], "service": service, "status": status}))
+                    svc_status = "manual_required" if service_result.manual_required else service_result.status
+                    DB.upsert_service_login(account["id"], service, svc_status, service_result.message)
+                    DB.update_task_item(task_id, account["id"], svc_status, service_result.message, service)
+                    _emit(manager.service_progress({"task_id": task_id, "account_id": account["id"], "service": service, "status": svc_status}))
                     if service_result.manual_required:
-                        return "manual_required"
-                return "success"
+                        result = "manual_required"
+                        return result
+                result = "success"
+                return result
             finally:
                 await browser.close()
-                if request.close_after:
+                if result == "success":
+                    settings = get_settings()
+                    if settings.delete_browser_after_complete:
+                        try:
+                            browser_manager.delete_browser(browser_id)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            browser_manager.close_browser(browser_id)
+                        except Exception:
+                            pass
+                elif request.close_after:
                     browser_manager.close_browser(browser_id)
 
 

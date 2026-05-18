@@ -28,6 +28,10 @@ export function listAmazonAccounts() {
   return request<{ items: AmazonAccount[] }>("/api/amazon/accounts");
 }
 
+export function updateAmazonAccount(id: number, data: { status?: string; message?: string }) {
+  return request<AmazonAccount>(`/api/amazon/accounts/${id}`, { method: "PATCH", body: jsonBody(data) });
+}
+
 export function deleteAmazonAccount(id: number) {
   return request<{ ok: boolean }>(`/api/amazon/accounts/${id}`, { method: "DELETE" });
 }

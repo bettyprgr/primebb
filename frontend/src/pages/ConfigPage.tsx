@@ -29,7 +29,8 @@ export function ConfigPage() {
             <dt>ipdata</dt><dd>{config.ipdata_configured ? "configured" : "not configured"}</dd>
             <dt>Proxy host</dt><dd>{config.proxy_host}:{config.proxy_port}</dd>
             <dt>Proxy username prefix</dt><dd>{config.proxy_username_prefix || "not configured"}</dd>
-            <dt>Proxy session TTL</dt><dd>{config.proxy_session_ttl}</dd>
+            <dt>Proxy session TTL</dt><dd>{config.proxy_session_ttl} min</dd>
+            <dt>Delete browser after complete</dt><dd>{config.delete_browser_after_complete ? "yes" : "no"}</dd>
           </dl>
         ) : <p>Loading config...</p>}
       </Card>

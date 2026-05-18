@@ -18,6 +18,10 @@ export function importAccounts(content: string) {
   return request<ImportAccountsResponse>("/api/accounts/import", { method: "POST", body: jsonBody({ content }) });
 }
 
+export function updateAccount(accountId: number, data: { status?: string; message?: string }) {
+  return request<Account>(`/api/accounts/${accountId}`, { method: "PATCH", body: jsonBody(data) });
+}
+
 export function deleteAccount(accountId: number) {
   return request<{ message: string }>(`/api/accounts/${accountId}`, { method: "DELETE" });
 }

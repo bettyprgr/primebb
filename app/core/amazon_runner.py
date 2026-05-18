@@ -21,6 +21,10 @@ _account_locks: dict[int, threading.Lock] = {}
 _account_locks_guard = threading.Lock()
 
 
+class BrowserClosedByUser(Exception):
+    pass
+
+
 def _account_lock(account_id: int) -> threading.Lock:
     with _account_locks_guard:
         if account_id not in _account_locks:
@@ -64,7 +68,7 @@ class AmazonTaskRunner:
         DB.update_task(task_id, status="running", message="running")
         _emit(manager.task_progress(DB.get_task(task_id) or {}))
 
-        stats = {"completed": 0, "failed": 0, "manual_required": 0}
+        stats = {"completed": 0, "failed": 0, "manual_required": 0, "cancelled": 0}
         stats_lock = threading.Lock()
 
         def process(amazon_id: int) -> str:
@@ -74,6 +78,8 @@ class AmazonTaskRunner:
                     stats["completed"] += 1
                 elif status == "manual_required":
                     stats["manual_required"] += 1
+                elif status == "cancelled":
+                    stats["cancelled"] += 1
                 else:
                     stats["failed"] += 1
                 DB.update_task(task_id, completed=stats["completed"], failed=stats["failed"], manual_required=stats["manual_required"])
@@ -90,7 +96,16 @@ class AmazonTaskRunner:
                     with stats_lock:
                         stats["failed"] += 1
 
-        final = "completed" if not stats["failed"] and not stats["manual_required"] else ("partial_manual_required" if stats["manual_required"] else "failed")
+        if stats["cancelled"] and not stats["failed"] and not stats["manual_required"] and not stats["completed"]:
+            final = "cancelled"
+        elif stats["cancelled"]:
+            final = "partial_cancelled"
+        elif not stats["failed"] and not stats["manual_required"]:
+            final = "completed"
+        elif stats["manual_required"]:
+            final = "partial_manual_required"
+        else:
+            final = "failed"
         DB.update_task(task_id, status=final, message="finished")
         _emit(manager.task_progress(DB.get_task(task_id) or {}))
 
@@ -101,16 +116,41 @@ class AmazonTaskRunner:
                 return "failed"
             DB.update_task_item(task_id, amazon_id, "running", "running")
             _emit(manager.account_progress({"task_id": task_id, "account_id": amazon_id, "status": "running"}))
-            try:
-                result = asyncio.run(self._run_async(task_id, account, template_browser_id, proxy_url_override))
-                DB.update_task_item(task_id, amazon_id, result, result)
-                _emit(manager.account_progress({"task_id": task_id, "account_id": amazon_id, "status": result}))
-                return result
-            except Exception as exc:
-                DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": str(exc)})
-                DB.update_task_item(task_id, amazon_id, "error", str(exc))
-                _log(task_id, amazon_id, "error", str(exc))
-                return "failed"
+
+            max_retries = 3
+            account_timeout = 720  # 12 minutes per attempt
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = asyncio.run(
+                        asyncio.wait_for(
+                            self._run_async(task_id, account, template_browser_id, proxy_url_override),
+                            timeout=account_timeout,
+                        )
+                    )
+                    DB.update_task_item(task_id, amazon_id, result, result)
+                    _emit(manager.account_progress({"task_id": task_id, "account_id": amazon_id, "status": result}))
+                    return result
+                except BrowserClosedByUser:
+                    _log(task_id, amazon_id, "warning", "browser closed by user — task cancelled")
+                    DB.upsert_amazon_account({"phone": account["phone"], "status": "cancelled", "message": "browser closed by user"})
+                    DB.update_task_item(task_id, amazon_id, "cancelled", "browser closed by user")
+                    _emit(manager.account_progress({"task_id": task_id, "account_id": amazon_id, "status": "cancelled"}))
+                    return "cancelled"
+                except asyncio.TimeoutError:
+                    _log(task_id, amazon_id, "warning", f"attempt {attempt}/{max_retries} timed out after {account_timeout}s")
+                    if attempt == max_retries:
+                        DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": "timed out after 3 attempts"})
+                        DB.update_task_item(task_id, amazon_id, "error", "timed out")
+                        return "failed"
+                    account = DB.get_amazon_account(amazon_id) or account
+                except Exception as exc:
+                    _log(task_id, amazon_id, "error", f"attempt {attempt}/{max_retries} error: {exc}")
+                    if attempt == max_retries:
+                        DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": str(exc)})
+                        DB.update_task_item(task_id, amazon_id, "error", str(exc))
+                        return "failed"
+                    account = DB.get_amazon_account(amazon_id) or account
+            return "failed"
 
     async def _run_async(self, task_id: str, account: dict[str, Any], template_browser_id: str | None, proxy_url_override: str | None = None) -> str:
         client = BitBrowserClient()
@@ -160,34 +200,82 @@ class AmazonTaskRunner:
                         raise
                     await asyncio.sleep(3)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = context.pages[-1] if context.pages else await context.new_page()
-            try:
-                # Try to get proxy region using a separate tab
-                try:
-                    geo_page = await context.new_page()
-                    geo = await verify_proxy_geo(geo_page, {"proxy_url": proxy_url, "email": account["phone"]})
-                    await geo_page.close()
-                    if geo:
-                        region = geo.get("region") or geo.get("country_name") or ""
-                        DB.upsert_amazon_account({"phone": account["phone"], "proxy_region": region})
-                except Exception:
-                    pass
 
-                result, name, password = await register_amazon(page, account["phone"], account["sms_url"], callback)
-                check_after = (datetime.now(timezone.utc) + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
-                DB.upsert_amazon_account({
-                    "phone": account["phone"],
-                    "status": result.status,
-                    "message": result.message,
-                    "name": name,
-                    "password": password,
-                    "check_after_at": check_after if result.success else None,
-                })
-                if result.manual_required:
-                    return "manual_required"
-                return "success" if result.success else "failed"
-            finally:
-                await browser.close()
+            # Detect user closing the browser profile
+            loop = asyncio.get_running_loop()
+            disconnect_future: asyncio.Future = loop.create_future()
+
+            def _on_disconnect():
+                if not disconnect_future.done():
+                    disconnect_future.set_result(True)
+
+            browser.on("disconnected", lambda _: _on_disconnect())
+
+            async def _register():
+                reg_result = "failed"
+                try:
+                    # Try to get proxy region using a separate tab
+                    try:
+                        geo_page = await context.new_page()
+                        geo = await verify_proxy_geo(geo_page, {"proxy_url": proxy_url, "email": account["phone"]})
+                        await geo_page.close()
+                        if geo:
+                            region = geo.get("region") or geo.get("country_name") or ""
+                            DB.upsert_amazon_account({"phone": account["phone"], "proxy_region": region})
+                    except Exception:
+                        pass
+
+                    result, name, password = await register_amazon(context, account["phone"], account["sms_url"], callback, preset_name=account.get("name"), bitbrowser_id=bitbrowser_id, client=client)
+                    check_after = (datetime.now(timezone.utc) + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
+                    DB.upsert_amazon_account({
+                        "phone": account["phone"],
+                        "status": result.status,
+                        "message": result.message,
+                        "name": name,
+                        "password": password,
+                        "check_after_at": check_after if result.success else None,
+                    })
+                    if result.manual_required:
+                        reg_result = "manual_required"
+                    else:
+                        reg_result = "success" if result.success else "failed"
+                    return reg_result
+                finally:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                    if reg_result == "success":
+                        settings = get_settings()
+                        loop = asyncio.get_running_loop()
+                        if settings.delete_browser_after_complete:
+                            try:
+                                await loop.run_in_executor(None, client.delete_profile, bitbrowser_id)
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                await loop.run_in_executor(None, client.close_profile, bitbrowser_id)
+                            except Exception:
+                                pass
+
+            reg_task = asyncio.ensure_future(_register())
+            done, pending = await asyncio.wait(
+                [reg_task, disconnect_future],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if disconnect_future in done and reg_task not in done:
+                # Browser closed — give reg_task a brief grace period to finish
+                try:
+                    return await asyncio.wait_for(asyncio.shield(reg_task), timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    reg_task.cancel()
+                    raise BrowserClosedByUser("browser closed by user")
+
+            for t in pending:
+                t.cancel()
+            return await reg_task
 
 
 class AmazonSuspendChecker:

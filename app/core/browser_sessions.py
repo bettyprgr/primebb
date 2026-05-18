@@ -56,6 +56,14 @@ class BrowserSessionManager:
         self.client.close_profile(browser_id)
         DB.update_browser_profile_status(browser_id, "closed")
 
+    def delete_browser(self, browser_id: str) -> None:
+        try:
+            self.client.close_profile(browser_id)
+        except Exception:
+            pass
+        self.client.delete_profile(browser_id)
+        DB.update_browser_profile_status(browser_id, "deleted")
+
 
 async def verify_proxy_geo(page, account: dict[str, Any]) -> dict[str, Any] | None:
     settings = get_settings()
