@@ -3,6 +3,25 @@ import { deleteAccountsBulk, deleteAllAccounts, listAccounts } from "../../api/a
 import { bulkDeleteAmazonAccounts, listAmazonAccounts, updateAmazonAccount } from "../../api/amazon";
 import type { AmazonAccount } from "../../api/amazon";
 import type { Account } from "../../api/types";
+
+function copyToClipboard(text: string): void {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).catch(() => _execCopy(text));
+  } else {
+    _execCopy(text);
+  }
+}
+
+function _execCopy(text: string): void {
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+  document.body.appendChild(el);
+  el.focus();
+  el.select();
+  try { document.execCommand("copy"); } catch { /* ignore */ }
+  document.body.removeChild(el);
+}
 import { Badge, statusTone } from "../../components/Badge";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
@@ -341,7 +360,7 @@ export function AccountsPage() {
                   .filter((a) => amazonSelected.has(a.id))
                   .map(buildDetailText)
                   .join("\n");
-                navigator.clipboard.writeText(text);
+                copyToClipboard(text);
                 setAmazonExportOpen(false);
               }}
             >
@@ -366,7 +385,7 @@ export function AccountsPage() {
             <div
               style={{ fontFamily: "monospace", fontSize: 13, background: "#0f172a", border: "1px solid #334155", borderRadius: 6, padding: "12px 14px", cursor: "pointer", wordBreak: "break-all", color: "#e2e8f0" }}
               title="Click to copy"
-              onClick={() => { navigator.clipboard.writeText(buildDetailText(amazonDetail)); setAmazonDetail(null); }}
+              onClick={() => { copyToClipboard(buildDetailText(amazonDetail)); setAmazonDetail(null); }}
             >
               {buildDetailText(amazonDetail)}
             </div>
