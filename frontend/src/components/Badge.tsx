@@ -1,10 +1,11 @@
 type BadgeProps = {
   children: React.ReactNode;
   tone?: "neutral" | "success" | "warning" | "danger" | "info";
+  style?: React.CSSProperties;
 };
 
-export function Badge({ children, tone = "neutral" }: BadgeProps) {
-  return <span className={`badge badge-${tone}`}>{children}</span>;
+export function Badge({ children, tone = "neutral", style }: BadgeProps) {
+  return <span className={`badge badge-${tone}`} style={style}>{children}</span>;
 }
 
 export function statusTone(status?: string): BadgeProps["tone"] {

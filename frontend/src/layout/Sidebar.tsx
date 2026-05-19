@@ -1,4 +1,5 @@
 import { NavLink } from "react-router-dom";
+import { Badge } from "../components/Badge";
 
 const sections = [
   { title: "PrimeBB", links: [{ to: "/", label: "Dashboard" }, { to: "/tools", label: "Tool Launcher" }] },
@@ -6,15 +7,15 @@ const sections = [
   { title: "Core", links: [{ to: "/accounts", label: "Accounts" }, { to: "/browsers", label: "Browsers" }, { to: "/tasks", label: "Tasks" }, { to: "/services", label: "Services" }, { to: "/config", label: "Config" }] },
 ];
 
-export function Sidebar() {
+export function Sidebar({ connected }: { connected: boolean }) {
   return (
     <aside className="sidebar">
       <div className="brand">
         <span className="brand-mark">P</span>
-        <div>
-          <strong>PrimeBB</strong>
-          <small>BitBrowser tool suite</small>
-        </div>
+        <strong>PrimeBB</strong>
+        <Badge tone={connected ? "success" : "warning"} style={{ marginLeft: "auto" }}>
+          {connected ? "Connected" : "Offline"}
+        </Badge>
       </div>
       {sections.map((section) => (
         <nav key={section.title} className="nav-section">
@@ -29,3 +30,4 @@ export function Sidebar() {
     </aside>
   );
 }
+

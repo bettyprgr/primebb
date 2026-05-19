@@ -8,9 +8,9 @@ export function DashboardLayout() {
 
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar connected={live.connected} />
       <div className="main-shell">
-        <Header connected={live.connected} />
+        <Header />
         <main className="content">
           <Outlet context={live} />
         </main>
@@ -18,3 +18,4 @@ export function DashboardLayout() {
     </div>
   );
 }
+
