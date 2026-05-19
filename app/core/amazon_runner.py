@@ -109,6 +109,32 @@ class AmazonTaskRunner:
         DB.update_task(task_id, status=final, message="finished")
         _emit(manager.task_progress(DB.get_task(task_id) or {}))
 
+    def _reset_browser_for_retry(self, task_id: str, account: dict, proxy_url_override: str | None) -> dict:
+        """Close and delete the current BitBrowser profile, assign a new proxy ssid.
+        Returns refreshed account dict so _run_async creates a clean profile on next attempt."""
+        phone = account["phone"]
+        bitbrowser_id = account.get("bitbrowser_id")
+        if bitbrowser_id:
+            client = BitBrowserClient()
+            try:
+                client.close_profile(bitbrowser_id)
+            except Exception:
+                pass
+            try:
+                client.delete_profile(bitbrowser_id)
+            except Exception:
+                pass
+            DB.upsert_amazon_account({"phone": phone, "bitbrowser_id": None})
+
+        if not proxy_url_override:
+            new_proxy_url, _, _, _ = build_proxy_url(account, rotate=True)
+            DB.upsert_amazon_account({"phone": phone, "proxy_url": new_proxy_url})
+            _log(task_id, account["id"], "info", "retry: deleted old browser profile, new proxy ssid assigned")
+        else:
+            _log(task_id, account["id"], "info", "retry: deleted old browser profile (proxy override kept)")
+
+        return DB.get_amazon_account(account["id"]) or account
+
     def _process_account(self, task_id: str, amazon_id: int, template_browser_id: str | None, proxy_url_override: str | None = None) -> str:
         with _account_lock(amazon_id):
             account = DB.get_amazon_account(amazon_id)
@@ -117,7 +143,7 @@ class AmazonTaskRunner:
             DB.update_task_item(task_id, amazon_id, "running", "running")
             _emit(manager.account_progress({"task_id": task_id, "account_id": amazon_id, "status": "running"}))
 
-            max_retries = 3
+            max_retries = 2
             account_timeout = 720  # 12 minutes per attempt
             for attempt in range(1, max_retries + 1):
                 try:
@@ -139,17 +165,17 @@ class AmazonTaskRunner:
                 except asyncio.TimeoutError:
                     _log(task_id, amazon_id, "warning", f"attempt {attempt}/{max_retries} timed out after {account_timeout}s")
                     if attempt == max_retries:
-                        DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": "timed out after 3 attempts"})
+                        DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": f"timed out after {max_retries} attempts"})
                         DB.update_task_item(task_id, amazon_id, "error", "timed out")
                         return "failed"
-                    account = DB.get_amazon_account(amazon_id) or account
+                    account = self._reset_browser_for_retry(task_id, account, proxy_url_override)
                 except Exception as exc:
                     _log(task_id, amazon_id, "error", f"attempt {attempt}/{max_retries} error: {exc}")
                     if attempt == max_retries:
                         DB.upsert_amazon_account({"phone": account["phone"], "status": "failed", "message": str(exc)})
                         DB.update_task_item(task_id, amazon_id, "error", str(exc))
                         return "failed"
-                    account = DB.get_amazon_account(amazon_id) or account
+                    account = self._reset_browser_for_retry(task_id, account, proxy_url_override)
             return "failed"
 
     async def _run_async(self, task_id: str, account: dict[str, Any], template_browser_id: str | None, proxy_url_override: str | None = None) -> str:

@@ -108,7 +108,9 @@ async def _detect_amazon_captcha(page) -> bool:
             otp_page = any(p in body_lower for p in ["verify mobile number", "enter security code", "enter the security code"])
             if otp_page:
                 return False
-            return any(p in body_lower for p in ["solve this puzzle", "choose all", "type the characters", "enter the characters"])
+            # Treat as captcha unconditionally — some captcha types (reCAPTCHA, invisible)
+            # render inside iframes and leave body nearly empty
+            return True
         captcha_input = await find_visible(page, [
             'input#captchacharacters',
             'input[name="captchacharacters"]',
