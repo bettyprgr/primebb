@@ -40,26 +40,29 @@ export function AmazonCreationWorkspace() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [taskId, setTaskId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // IDs of accounts imported in this run — used to filter "Created accounts"
+  const [runAccountIds, setRunAccountIds] = useState<number[]>([]);
   const [accounts, setAccounts] = useState<AmazonAccount[]>([]);
 
-  function loadAccounts() {
-    listAmazonAccounts().then((d) => setAccounts(d.items)).catch(() => {});
+  function loadAccounts(ids: number[]) {
+    if (!ids.length) return;
+    listAmazonAccounts().then((d) => {
+      setAccounts(d.items.filter((a) => ids.includes(a.id)));
+    }).catch(() => {});
   }
 
-  useEffect(() => { loadAccounts(); }, []);
-
   useEffect(() => {
-    if (phase !== "running") return;
-    const interval = setInterval(loadAccounts, 5000);
+    if (phase !== "running" || !runAccountIds.length) return;
+    const interval = setInterval(() => loadAccounts(runAccountIds), 5000);
     return () => clearInterval(interval);
-  }, [phase]);
+  }, [phase, runAccountIds]);
 
   useEffect(() => {
     if (!taskId || phase !== "running") return;
     const task = live.tasks[taskId];
     if (!task) return;
     if (!["completed", "failed", "partial_manual_required", "cancelled", "partial_cancelled"].includes(task.status)) return;
-    loadAccounts();
+    loadAccounts(runAccountIds);
     setPhase("done");
   }, [live.tasks, taskId, phase]);
 
@@ -83,6 +86,8 @@ export function AmazonCreationWorkspace() {
       }
       const created = await createAmazonTask(imported.account_ids, templateBrowserId || null, concurrency, proxyLines.length ? proxyLines : []);
       setTaskId(created.id);
+      setRunAccountIds(imported.account_ids);
+      setAccounts([]);
       setPhase("running");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -95,6 +100,8 @@ export function AmazonCreationWorkspace() {
     setError(null);
     setPhonesText("");
     setProxiesText("");
+    setRunAccountIds([]);
+    setAccounts([]);
   }
 
   const createdAccounts = accounts.filter((a) => a.status === "created");
@@ -166,13 +173,6 @@ export function AmazonCreationWorkspace() {
                   </div>
                 </div>
               )}
-              <div className="log-list sp-log-scroll">
-                {filteredLogs.length
-                  ? filteredLogs.map((log) => (
-                      <div key={log.id}><span className="badge">{log.level}</span><span>{log.message}</span></div>
-                    ))
-                  : <p style={{ color: "#94a3b8", margin: 0 }}>Waiting for logs…</p>}
-              </div>
             </div>
           )}
 
@@ -185,32 +185,45 @@ export function AmazonCreationWorkspace() {
             </div>
           )}
         </Card>
+
+        {/* Right: log panel */}
+        <Card title="Logs" description="Live output for this run.">
+          <div className="log-list sp-log-scroll" style={{ minHeight: 300 }}>
+            {filteredLogs.length
+              ? filteredLogs.map((log) => (
+                  <div key={log.id}><span className="badge">{log.level}</span><span>{log.message}</span></div>
+                ))
+              : <p style={{ color: "#94a3b8", margin: 0 }}>Waiting for logs…</p>}
+          </div>
+        </Card>
       </div>
 
-      {/* Full-width created accounts */}
-      <Card
-        title="Created accounts"
-        description={`${createdAccounts.length} created · phone|sms_url|pass|name|region|date_created`}
-      >
-        <textarea
-          readOnly
-          value={createdText}
-          style={{
-            width: "100%",
-            minHeight: 200,
-            fontFamily: "monospace",
-            fontSize: 12,
-            background: "#0f172a",
-            color: "#e2e8f0",
-            border: "1px solid #334155",
-            borderRadius: 6,
-            padding: "10px 12px",
-            resize: "vertical",
-            boxSizing: "border-box",
-          }}
-          placeholder="Created accounts will appear here…"
-        />
-      </Card>
+      {/* Full-width created accounts — only from this run */}
+      {(phase === "running" || phase === "done") && (
+        <Card
+          title="Created accounts"
+          description={`${createdAccounts.length} created this run · phone|sms_url|pass|name|region|date_created`}
+        >
+          <textarea
+            readOnly
+            value={createdText}
+            style={{
+              width: "100%",
+              minHeight: 200,
+              fontFamily: "monospace",
+              fontSize: 12,
+              background: "#0f172a",
+              color: "#e2e8f0",
+              border: "1px solid #334155",
+              borderRadius: 6,
+              padding: "10px 12px",
+              resize: "vertical",
+              boxSizing: "border-box",
+            }}
+            placeholder="Created accounts will appear here…"
+          />
+        </Card>
+      )}
     </div>
   );
 }
