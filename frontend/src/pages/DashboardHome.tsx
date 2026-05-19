@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useOutletContext } from "react-router-dom";
 import { listAccounts } from "../api/accounts";
+import { listAmazonAccounts } from "../api/amazon";
 import { getConfig } from "../api/config";
 import { listServices } from "../api/services";
 import { listTasks } from "../api/tasks";
@@ -12,12 +13,14 @@ import { Card } from "../components/Card";
 export function DashboardHome() {
   const live = useOutletContext<ReturnType<typeof usePrimeBbWebSocket>>();
   const [accounts, setAccounts] = useState<Account[]>([]);
+  const [amazonCreated, setAmazonCreated] = useState(0);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [services, setServices] = useState<string[]>([]);
   const [config, setConfig] = useState<ConfigResponse | null>(null);
 
   useEffect(() => {
     listAccounts({ page_size: 200 }).then((data) => setAccounts(data.items)).catch(() => setAccounts([]));
+    listAmazonAccounts().then((data) => setAmazonCreated(data.items.filter((a) => a.status === "created").length)).catch(() => setAmazonCreated(0));
     listTasks().then(setTasks).catch(() => setTasks([]));
     listServices().then((data) => setServices(data.items)).catch(() => setServices([]));
     getConfig().then(setConfig).catch(() => setConfig(null));
@@ -30,7 +33,7 @@ export function DashboardHome() {
   }, [tasks, live.tasks]);
 
   const runningTasks = mergedTasks.filter((task) => task.status === "running").length;
-  const manualAccounts = accounts.filter((account) => account.status === "manual_required").length;
+  const gmailPumped = accounts.filter((a) => a.status === "google_authenticated").length;
 
   return (
     <div className="page-stack">
@@ -39,8 +42,8 @@ export function DashboardHome() {
         <p>Overview of the PrimeBB tool suite and shared automation infrastructure.</p>
       </div>
       <div className="stats-grid">
-        <Card><div className="stat"><span>Accounts</span><strong>{accounts.length}</strong></div></Card>
-        <Card><div className="stat"><span>Manual required</span><strong>{manualAccounts}</strong></div></Card>
+        <Card><div className="stat"><span>Gmail social pumped</span><strong>{gmailPumped}</strong></div></Card>
+        <Card><div className="stat"><span>Amazon created</span><strong>{amazonCreated}</strong></div></Card>
         <Card><div className="stat"><span>Running tasks</span><strong>{runningTasks}</strong></div></Card>
         <Card><div className="stat"><span>Services</span><strong>{services.length}</strong></div></Card>
       </div>
