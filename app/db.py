@@ -485,11 +485,3 @@ class DB:
             )
             conn.commit()
             return len(zombie_ids)
-
-    @staticmethod
-    def list_amazon_accounts_pending_check() -> list[dict[str, Any]]:
-        with _lock, DB.session() as conn:
-            rows = conn.execute(
-                "SELECT * FROM amazon_accounts WHERE status = 'created' AND check_after_at IS NOT NULL AND check_after_at <= CURRENT_TIMESTAMP"
-            ).fetchall()
-            return [dict(row) for row in rows]

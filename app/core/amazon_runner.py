@@ -2,12 +2,10 @@ import asyncio
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from playwright.async_api import async_playwright
 
-from app.automation.amazon_check import check_amazon_suspended
 from app.automation.amazon_reg import register_amazon
 from app.config import get_settings
 from app.core.bitbrowser import BitBrowserClient
@@ -255,14 +253,12 @@ class AmazonTaskRunner:
                         pass
 
                     result, name, password = await register_amazon(context, account["phone"], account["sms_url"], callback, preset_name=account.get("name"), bitbrowser_id=bitbrowser_id, client=client)
-                    check_after = (datetime.now(timezone.utc) + timedelta(minutes=20)).strftime("%Y-%m-%d %H:%M:%S")
                     DB.upsert_amazon_account({
                         "phone": account["phone"],
                         "status": result.status,
                         "message": result.message,
                         "name": name,
                         "password": password,
-                        "check_after_at": check_after if result.success else None,
                     })
                     if result.manual_required:
                         reg_result = "manual_required"
@@ -308,50 +304,4 @@ class AmazonTaskRunner:
             return await reg_task
 
 
-class AmazonSuspendChecker:
-    def check_account(self, amazon_id: int, template_browser_id: str | None = None) -> None:
-        executor.submit(self._run, amazon_id, template_browser_id)
-
-    def _run(self, amazon_id: int, template_browser_id: str | None) -> None:
-        account = DB.get_amazon_account(amazon_id)
-        if not account:
-            return
-        try:
-            asyncio.run(self._run_async(account, template_browser_id))
-        except Exception as exc:
-            # Only log the error — do not overwrite account status with transient
-            # infrastructure errors (BitBrowser rate limit, network issues, etc.)
-            DB.add_event(None, amazon_id, "amazon", "warning", "automation", f"suspend check error: {exc}")
-
-    async def _run_async(self, account: dict[str, Any], template_browser_id: str | None) -> None:
-        client = BitBrowserClient()
-        bitbrowser_id = account.get("bitbrowser_id")
-        existing = client.get_profile(bitbrowser_id) if bitbrowser_id else None
-        if not existing:
-            return
-
-        open_data = client.open_profile(bitbrowser_id)
-        ws = open_data.get("ws")
-        if not ws:
-            return
-
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.connect_over_cdp(ws)
-            context = browser.contexts[0] if browser.contexts else await browser.new_context()
-            page = context.pages[-1] if context.pages else await context.new_page()
-            try:
-                suspended, message = await check_amazon_suspended(page)
-                now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-                DB.upsert_amazon_account({
-                    "phone": account["phone"],
-                    "status": "suspended" if suspended else "active",
-                    "message": message,
-                    "last_checked_at": now,
-                    "check_after_at": None,
-                })
-            finally:
-                await browser.close()
-
-
 amazon_task_runner = AmazonTaskRunner()
-amazon_suspend_checker = AmazonSuspendChecker()
