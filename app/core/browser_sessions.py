@@ -1,10 +1,9 @@
 import json
-from datetime import datetime, timezone
 from typing import Any
 
 from app.config import get_settings
 from app.core.bitbrowser import BitBrowserClient
-from app.core.proxies import bitbrowser_proxy_fields, build_proxy_url, region_slug
+from app.core.proxies import bitbrowser_proxy_fields, build_proxy_url
 from app.db import DB
 
 
@@ -65,7 +64,7 @@ class BrowserSessionManager:
         DB.update_browser_profile_status(browser_id, "deleted")
 
 
-async def verify_proxy_geo(page, account: dict[str, Any]) -> dict[str, Any] | None:
+async def verify_proxy_geo(page) -> dict[str, Any] | None:
     settings = get_settings()
     if not settings.ipdata_api_key:
         return None
@@ -75,18 +74,4 @@ async def verify_proxy_geo(page, account: dict[str, Any]) -> dict[str, Any] | No
     await page.goto(url, timeout=30000, wait_until="domcontentloaded")
     body = await page.locator("body").inner_text(timeout=10000)
     data = json.loads(body)
-    region = data.get("region")
-    payload = {
-        "email": account["email"],
-        "proxy_ip": data.get("ip"),
-        "proxy_state_region": region,
-        "proxy_region_slug": region_slug(region),
-        "proxy_country_name": data.get("country_name"),
-        "proxy_country_code": data.get("country_code"),
-        "proxy_latitude": data.get("latitude"),
-        "proxy_longitude": data.get("longitude"),
-        "proxy_postal": data.get("postal"),
-        "proxy_checked_at": datetime.now(timezone.utc).isoformat(),
-    }
-    DB.upsert_account(payload)
     return data

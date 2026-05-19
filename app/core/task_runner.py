@@ -2,6 +2,7 @@ import asyncio
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any
 
 from playwright.async_api import async_playwright
@@ -10,6 +11,7 @@ from app.automation.google_auth import ensure_google_authenticated
 from app.automation.service_login import SUPPORTED_SERVICES, login_service_with_google
 from app.config import get_settings
 from app.core.browser_sessions import BrowserSessionManager, verify_proxy_geo
+from app.core.proxies import region_slug
 from app.core.websocket import manager
 from app.db import DB
 from app.schemas import TaskCreateRequest, TaskStatus, TaskType
@@ -142,8 +144,21 @@ class TaskRunner:
             result = "failed"
             try:
                 try:
-                    geo = await verify_proxy_geo(page, account)
+                    geo = await verify_proxy_geo(page)
                     if geo:
+                        region = geo.get("region")
+                        DB.upsert_account({
+                            "email": account["email"],
+                            "proxy_ip": geo.get("ip"),
+                            "proxy_state_region": region,
+                            "proxy_region_slug": region_slug(region),
+                            "proxy_country_name": geo.get("country_name"),
+                            "proxy_country_code": geo.get("country_code"),
+                            "proxy_latitude": geo.get("latitude"),
+                            "proxy_longitude": geo.get("longitude"),
+                            "proxy_postal": geo.get("postal"),
+                            "proxy_checked_at": datetime.now(timezone.utc).isoformat(),
+                        })
                         log_event(task_id, account["id"], None, "info", "proxy_geo", "proxy geo verified")
                 except Exception as exc:
                     log_event(task_id, account["id"], None, "warning", "proxy_geo_failed", f"proxy geo check failed: {exc}")

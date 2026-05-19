@@ -244,7 +244,7 @@ class AmazonTaskRunner:
                     # Try to get proxy region using a separate tab
                     try:
                         geo_page = await context.new_page()
-                        geo = await verify_proxy_geo(geo_page, {"proxy_url": proxy_url, "email": account["phone"]})
+                        geo = await verify_proxy_geo(geo_page)
                         await geo_page.close()
                         if geo:
                             region = geo.get("region") or geo.get("country_name") or ""
