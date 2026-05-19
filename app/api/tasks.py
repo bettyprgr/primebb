@@ -35,3 +35,9 @@ def cancel_task(task_id: str):
         raise HTTPException(status_code=404, detail="task not found")
     DB.update_task(task_id, status="cancelled", message="cancelled")
     return {"message": "cancelled"}
+
+
+@router.post("/cleanup/zombies")
+def cleanup_zombies():
+    cleaned = DB.cleanup_zombie_tasks(stale_minutes=0)
+    return {"cleaned": cleaned}

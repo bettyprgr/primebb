@@ -19,6 +19,7 @@ def start_suspend_scheduler() -> None:
 
 
 def _loop() -> None:
+    tick = 0
     while True:
         try:
             pending = DB.list_amazon_accounts_pending_check()
@@ -26,4 +27,13 @@ def _loop() -> None:
                 amazon_suspend_checker.check_account(account["id"])
         except Exception:
             pass
+        # Clean zombie tasks every 10 ticks (~10 min), stale > 60 min
+        tick += 1
+        if tick % 10 == 0:
+            try:
+                cleaned = DB.cleanup_zombie_tasks(stale_minutes=60)
+                if cleaned:
+                    DB.add_event(None, None, None, "warning", "zombie_cleanup", f"cleaned {cleaned} zombie task(s)")
+            except Exception:
+                pass
         time.sleep(60)

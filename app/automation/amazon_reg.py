@@ -2,6 +2,7 @@ import asyncio
 import random
 import re
 import string
+import threading
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,9 @@ if TYPE_CHECKING:
     from app.core.bitbrowser import BitBrowserClient
 
 Callback = Callable[[str, str], Awaitable[None] | None]
+
+# Serialize clipboard access across concurrent threads (one clipboard per OS)
+_clipboard_lock = threading.Lock()
 
 US_NAMES = [
     "Jacob", "Michael", "Joshua", "Matthew", "Ethan", "Andrew", "Daniel", "Christopher",
@@ -47,26 +51,30 @@ async def _emit(callback: Callback | None, level: str, message: str) -> None:
 
 
 async def _autopaste_fill(page, element, text: str, bitbrowser_id: str, client: "BitBrowserClient") -> None:
-    """Set clipboard via JS execCommand, focus the input, then call BitBrowser autopaste API."""
-    # Set clipboard using a hidden textarea + execCommand — works without clipboard permissions
-    await page.evaluate("""(t) => {
-        const el = document.createElement('textarea');
-        el.value = t;
-        el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
-        document.body.appendChild(el);
-        el.focus();
-        el.select();
-        document.execCommand('copy');
-        document.body.removeChild(el);
-    }""", text)
-    await asyncio.sleep(0.2)
-    # Focus the target input field
-    await element.click()
-    await asyncio.sleep(0.3)
-    # Call BitBrowser autopaste — runs in thread pool to avoid blocking event loop
+    """Set clipboard via JS execCommand, focus the input, then call BitBrowser autopaste API.
+    Holds _clipboard_lock for the full sequence to prevent clipboard corruption when multiple
+    profiles run concurrently."""
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, client.autopaste, bitbrowser_id, page.url)
-    await asyncio.sleep(0.5)
+    # Acquire cross-thread lock in executor so we don't block the event loop while waiting
+    await loop.run_in_executor(None, _clipboard_lock.acquire)
+    try:
+        await page.evaluate("""(t) => {
+            const el = document.createElement('textarea');
+            el.value = t;
+            el.style.cssText = 'position:fixed;opacity:0;top:0;left:0';
+            document.body.appendChild(el);
+            el.focus();
+            el.select();
+            document.execCommand('copy');
+            document.body.removeChild(el);
+        }""", text)
+        await asyncio.sleep(0.2)
+        await element.click()
+        await asyncio.sleep(0.3)
+        await loop.run_in_executor(None, client.autopaste, bitbrowser_id, page.url)
+        await asyncio.sleep(0.5)
+    finally:
+        _clipboard_lock.release()
 
 
 async def _click_text(page, texts: list[str]) -> bool:
@@ -136,12 +144,8 @@ async def _wait_for_captcha_solved(page, callback: Callback | None = None, timeo
     return False
 
 
-async def _do_register(page, phone: str, sms_url: str, name: str, password: str, callback: Callback | None, wait_on_captcha: bool, bitbrowser_id: str = "", client: "BitBrowserClient | None" = None) -> tuple[AutomationResult, bool]:
-    """
-    Run one registration attempt on the given page.
-    Returns (result, hit_captcha).
-    hit_captcha=True means captcha was encountered and we should retry (if wait_on_captcha=False).
-    """
+async def _do_register(page, phone: str, sms_url: str, name: str, password: str, callback: Callback | None, bitbrowser_id: str = "", client: "BitBrowserClient | None" = None) -> AutomationResult:
+    """Run registration on the given page. Pauses and waits for user to solve any captchas in-place."""
     await _emit(callback, "info", f"opening amazon registration (phone={phone})")
 
     # Step 1: Search Google for "amazon deal"
@@ -225,7 +229,11 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
             except Exception:
                 pass
     if not sign_clicked:
-        await _emit(callback, "warning", "Sign button not found on amazon.com")
+        await _emit(callback, "warning", "Sign button not found, navigating directly to signin")
+        try:
+            await page.goto("https://www.amazon.com/ap/signin?openid.pape.max_auth_age=0&openid.return_to=https%3A%2F%2Fwww.amazon.com%2F&openid.identity=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.assoc_handle=usflex&openid.mode=checkid_setup&openid.claimed_id=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0%2Fidentifier_select&openid.ns=http%3A%2F%2Fspecs.openid.net%2Fauth%2F2.0", timeout=30000, wait_until="domcontentloaded")
+        except Exception:
+            pass
     await asyncio.sleep(4)
     await _emit(callback, "info", f"after sign click: {page.url}")
 
@@ -246,7 +254,9 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
         await _click_text(page, ["Continue"])
         await asyncio.sleep(4)
     else:
-        await _emit(callback, "warning", f"phone input not found, url={page.url}")
+        body_snippet = (await page.locator("body").inner_text(timeout=3000))[:200]
+        await _emit(callback, "warning", f"phone input not found, url={page.url} body={body_snippet}")
+        return AutomationResult(success=False, status="failed", message="phone input not found", data={"url": page.url})
 
     await _emit(callback, "info", f"after continue: {page.url}")
 
@@ -288,30 +298,26 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
         body_check = (await page.locator("body").inner_text(timeout=3000)).lower()
         if "forgot password" in body_check and "password" in body_check and "create" not in body_check:
             await _emit(callback, "warning", f"phone {phone} already has an Amazon account (password page shown)")
-            return AutomationResult(success=False, status="account_exists", message="phone already has an Amazon account", data={"url": page.url}), False
+            return AutomationResult(success=False, status="account_exists", message="phone already has an Amazon account", data={"url": page.url})
     except Exception:
         pass
 
     # Captcha check 1: landing page
     if await _detect_amazon_captcha(page):
         await _emit(callback, "info", "captcha detected on landing page")
-        if not wait_on_captcha:
-            return AutomationResult(success=False, status="captcha", message="captcha on landing page"), True
         if not await _wait_for_captcha_solved(page, callback):
-            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url}), True
+            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url})
 
     manual = await detect_manual_verification(page)
     if manual:
-        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url}), False
+        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
 
     await _emit(callback, "info", f"current url: {page.url}")
 
-    # Captcha check 2
+    # Captcha check 2: before name form
     if await _detect_amazon_captcha(page):
-        if not wait_on_captcha:
-            return AutomationResult(success=False, status="captcha", message="captcha before name form"), True
         if not await _wait_for_captcha_solved(page, callback):
-            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url}), True
+            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url})
 
     # Fill name
     name_input = await find_visible(page, [
@@ -329,7 +335,7 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
     else:
         body_snippet = (await page.locator("body").inner_text(timeout=3000))[:300]
         await _emit(callback, "warning", f"name input not found. url={page.url} body={body_snippet}")
-        return AutomationResult(success=False, status="failed", message="name input not found", data={"url": page.url}), False
+        return AutomationResult(success=False, status="failed", message="name input not found", data={"url": page.url})
 
     # Fill password
     pwd_input = await find_visible(page, ['input[name="password"]', 'input[id="ap_password"]', 'input[type="password"]'], timeout=3000)
@@ -355,14 +361,12 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
     # Captcha check 3: after form submit
     if await _detect_amazon_captcha(page):
         await _emit(callback, "info", "captcha detected after form submit")
-        if not wait_on_captcha:
-            return AutomationResult(success=False, status="captcha", message="captcha after form submit"), True
         if not await _wait_for_captcha_solved(page, callback):
-            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url}), True
+            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url})
 
     manual = await detect_manual_verification(page)
     if manual:
-        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url}), False
+        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
 
     # Check if OTP page
     otp_input = await find_visible(page, [
@@ -374,15 +378,42 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
     ], timeout=5000)
 
     if not otp_input:
-        body = await page.locator("body").inner_text(timeout=5000)
-        if any(t in body.lower() for t in ["your account", "hello,", "sign out", "account & lists"]):
-            return AutomationResult(success=True, status="created", message="amazon account created"), False
-        return AutomationResult(success=False, status="failed", message="OTP input not found", data={"url": page.url}), False
+        try:
+            current_url = page.url
+            body = await page.locator("body").inner_text(timeout=5000)
+            body_snippet = body[:500].replace("\n", " ").strip()
+            await _emit(callback, "info", f"OTP input not found: url={current_url} body={body_snippet}")
+            if any(t in body.lower() for t in ["your account", "hello,", "sign out", "account & lists"]):
+                return AutomationResult(success=True, status="created", message="amazon account created")
+        except Exception as exc:
+            await _emit(callback, "warning", f"OTP input not found, page may be closed: {exc}")
+            return AutomationResult(success=False, status="failed", message=f"OTP input not found, page closed: {exc}")
+        return AutomationResult(success=False, status="failed", message="OTP input not found", data={"url": page.url})
 
     await _emit(callback, "info", "waiting for OTP from SMS service...")
-    otp = await fetch_otp(sms_url, timeout=180.0)
+    # Log OTP page body so we can inspect Resend link text
+    try:
+        otp_page_body = await page.locator("body").inner_text(timeout=3000)
+        await _emit(callback, "info", f"OTP page body: {otp_page_body[:500].replace(chr(10), ' ').strip()}")
+    except Exception:
+        pass
+    otp = await fetch_otp(sms_url, timeout=120.0, callback=callback)
     if not otp:
-        return AutomationResult(success=False, status="failed", message="OTP not received within 3 minutes"), False
+        # Dump page state before attempting resend
+        try:
+            resend_body = await page.locator("body").inner_text(timeout=3000)
+            await _emit(callback, "info", f"page before resend: url={page.url} body={resend_body[:500].replace(chr(10), ' ').strip()}")
+        except Exception:
+            pass
+        await _emit(callback, "info", "OTP not received after 2 min — clicking Resend code...")
+        resent = await _click_text(page, ["Resend code", "Send a new code", "Resend OTP", "Resend", "Send new code"])
+        if resent:
+            await _emit(callback, "info", "clicked Resend code, waiting 3 more minutes...")
+        else:
+            await _emit(callback, "warning", "Resend code link not found, still waiting...")
+        otp = await fetch_otp(sms_url, timeout=180.0, callback=callback)
+    if not otp:
+        return AutomationResult(success=False, status="failed", message="OTP not received within 5 minutes")
 
     await _emit(callback, "info", f"received OTP: {otp}")
     if client and bitbrowser_id:
@@ -396,14 +427,12 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
     # Captcha check 4: after OTP submit
     if await _detect_amazon_captcha(page):
         await _emit(callback, "info", "captcha detected after OTP submit")
-        if not wait_on_captcha:
-            return AutomationResult(success=False, status="captcha", message="captcha after OTP submit"), True
         if not await _wait_for_captcha_solved(page, callback):
-            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url}), True
+            return AutomationResult(success=False, manual_required=True, status="manual_captcha", message="captcha timeout", data={"url": page.url})
 
     manual = await detect_manual_verification(page)
     if manual:
-        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url}), False
+        return AutomationResult(success=False, manual_required=True, status=manual.status, message=manual.message, data={"url": page.url})
 
     body = await page.locator("body").inner_text(timeout=5000)
     url = page.url.lower()
@@ -411,15 +440,16 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
     body_snippet = body[:400].replace("\n", " ").strip()
     await _emit(callback, "info", f"final check: url={page.url} body={body_snippet}")
 
-    # new_account=1 in URL is a reliable Amazon signal that registration succeeded
-    if "new_account=1" in url:
-        return AutomationResult(success=True, status="created", message="amazon account created"), False
+    # new_account=1 (or URL-encoded %3D1) is a reliable Amazon signal that registration succeeded
+    # /ax/claim/webauthn/nudge is a passkey enrollment page shown right after account creation
+    if "new_account=1" in url or "new_account%3d1" in url or "/ax/claim/webauthn/nudge" in url:
+        return AutomationResult(success=True, status="created", message="amazon account created")
 
     success_body = ["your account", "hello,", "account & lists", "start shopping",
                     "welcome to amazon", "protect your account", "add a payment method",
                     "keep shopping", "sign out"]
     if any(t in body_lower for t in success_body):
-        return AutomationResult(success=True, status="created", message="amazon account created"), False
+        return AutomationResult(success=True, status="created", message="amazon account created")
 
     # OTP was accepted if we're no longer on the OTP input page.
     # Amazon sometimes redirects back to /ap/register after account creation.
@@ -429,47 +459,30 @@ async def _do_register(page, phone: str, sms_url: str, name: str, password: str,
         'input[name="code"]',
     ], timeout=1000)
     if not otp_still:
-        # OTP page is gone — account was created
-        return AutomationResult(success=True, status="created", message="amazon account created"), False
+        return AutomationResult(success=True, status="created", message="amazon account created")
 
     auth_paths = ["/ap/", "/ax/", "signin", "register", "validatecaptcha"]
     if "amazon.com" in url and not any(p in url for p in auth_paths):
-        return AutomationResult(success=True, status="created", message="amazon account created"), False
+        return AutomationResult(success=True, status="created", message="amazon account created")
 
-    return AutomationResult(success=False, status="failed", message="registration not confirmed", data={"url": page.url}), False
+    return AutomationResult(success=False, status="failed", message="registration not confirmed", data={"url": page.url})
 
 
 async def register_amazon(context, phone: str, sms_url: str, callback: Callback | None = None, preset_name: str | None = None, bitbrowser_id: str = "", client: "BitBrowserClient | None" = None) -> tuple[AutomationResult, str, str]:
-    """
-    Returns (result, name, password).
-    Retries up to 2 times on captcha by closing and reopening a fresh tab.
-    On the 3rd attempt, waits for the user to solve the captcha manually.
-    """
+    """Returns (result, name, password). Opens a single tab and waits in-place for any captchas."""
     name = preset_name.strip() if preset_name and preset_name.strip() else random_name()
     password = random_password()
 
-    max_auto_retries = 2  # attempts 1 and 2 auto-retry; attempt 3 waits for user
-
-    for attempt in range(1, max_auto_retries + 2):
-        wait_on_captcha = attempt > max_auto_retries
-        if attempt > 1:
-            await _emit(callback, "info", f"retry attempt {attempt} (captcha on previous attempt, opening fresh tab)")
-
-        page = await context.new_page()
+    page = await context.new_page()
+    try:
+        result = await _do_register(page, phone, sms_url, name, password, callback, bitbrowser_id=bitbrowser_id, client=client)
+    except Exception as exc:
+        await _emit(callback, "error", f"registration error: {exc}")
+        result = AutomationResult(success=False, status="failed", message=str(exc))
+    finally:
         try:
-            result, hit_captcha = await _do_register(page, phone, sms_url, name, password, callback, wait_on_captcha, bitbrowser_id=bitbrowser_id, client=client)
-        except Exception as exc:
-            await _emit(callback, "error", f"attempt {attempt} error: {exc}")
-            result, hit_captcha = AutomationResult(success=False, status="failed", message=str(exc)), False
-        finally:
-            try:
-                await page.close()
-            except Exception:
-                pass
-
-        if not hit_captcha or wait_on_captcha:
-            return result, name, password
-
-        await _emit(callback, "info", f"captcha hit on attempt {attempt}, will retry with fresh tab")
+            await page.close()
+        except Exception:
+            pass
 
     return result, name, password

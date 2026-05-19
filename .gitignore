@@ -28,7 +28,6 @@ data/
 
 # Frontend
 frontend/node_modules/
-frontend/dist/
 *.tsbuildinfo
 
 # OS/editor

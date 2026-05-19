@@ -459,6 +459,34 @@ class DB:
             return cursor.rowcount
 
     @staticmethod
+    def cleanup_zombie_tasks(stale_minutes: int = 60) -> int:
+        """Mark running tasks/items as failed if not updated recently.
+        stale_minutes=0 cleans all running tasks immediately (use on server restart)."""
+        with _lock, DB.session() as conn:
+            cur = conn.cursor()
+            if stale_minutes == 0:
+                cur.execute("SELECT id FROM tasks WHERE status = 'running'")
+            else:
+                cur.execute(
+                    "SELECT id FROM tasks WHERE status = 'running' AND updated_at <= datetime('now', ?)",
+                    (f"-{stale_minutes} minutes",),
+                )
+            zombie_ids = [r[0] for r in cur.fetchall()]
+            if not zombie_ids:
+                return 0
+            placeholders = ",".join("?" * len(zombie_ids))
+            cur.execute(
+                f"UPDATE tasks SET status='failed', message='cleaned up: zombie task', updated_at=CURRENT_TIMESTAMP WHERE id IN ({placeholders})",
+                zombie_ids,
+            )
+            cur.execute(
+                f"UPDATE task_items SET status='error', message='cleaned up: zombie task', finished_at=COALESCE(finished_at, CURRENT_TIMESTAMP) WHERE task_id IN ({placeholders}) AND status IN ('running', 'pending')",
+                zombie_ids,
+            )
+            conn.commit()
+            return len(zombie_ids)
+
+    @staticmethod
     def list_amazon_accounts_pending_check() -> list[dict[str, Any]]:
         with _lock, DB.session() as conn:
             rows = conn.execute(

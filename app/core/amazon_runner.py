@@ -201,17 +201,20 @@ class AmazonTaskRunner:
                     await asyncio.sleep(3)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
 
-            # Detect user closing the browser profile
+            # Detect user closing the browser profile.
+            # bot_closing flag prevents self-close from being mistaken for user action.
             loop = asyncio.get_running_loop()
             disconnect_future: asyncio.Future = loop.create_future()
+            bot_closing = False
 
             def _on_disconnect():
-                if not disconnect_future.done():
+                if not bot_closing and not disconnect_future.done():
                     disconnect_future.set_result(True)
 
             browser.on("disconnected", lambda _: _on_disconnect())
 
             async def _register():
+                nonlocal bot_closing
                 reg_result = "failed"
                 try:
                     # Try to get proxy region using a separate tab
@@ -241,6 +244,7 @@ class AmazonTaskRunner:
                         reg_result = "success" if result.success else "failed"
                     return reg_result
                 finally:
+                    bot_closing = True
                     try:
                         await browser.close()
                     except Exception:
@@ -266,9 +270,9 @@ class AmazonTaskRunner:
             )
 
             if disconnect_future in done and reg_task not in done:
-                # Browser closed — give reg_task a brief grace period to finish
+                # User closed browser — give reg_task a brief grace period to finish
                 try:
-                    return await asyncio.wait_for(asyncio.shield(reg_task), timeout=3.0)
+                    return await asyncio.wait_for(asyncio.shield(reg_task), timeout=10.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     reg_task.cancel()
                     raise BrowserClosedByUser("browser closed by user")
