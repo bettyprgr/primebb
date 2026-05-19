@@ -319,7 +319,9 @@ class AmazonSuspendChecker:
         try:
             asyncio.run(self._run_async(account, template_browser_id))
         except Exception as exc:
-            DB.upsert_amazon_account({"phone": account["phone"], "status": "error", "message": str(exc)})
+            # Only log the error — do not overwrite account status with transient
+            # infrastructure errors (BitBrowser rate limit, network issues, etc.)
+            DB.add_event(None, amazon_id, "amazon", "warning", "automation", f"suspend check error: {exc}")
 
     async def _run_async(self, account: dict[str, Any], template_browser_id: str | None) -> None:
         client = BitBrowserClient()
