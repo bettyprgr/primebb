@@ -42,11 +42,13 @@ _dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if _dist.exists():
     from fastapi.responses import FileResponse
 
-    @app.get("/")
-    def root():
-        return FileResponse(_dist / "index.html")
+    # Serve static assets (JS/CSS) from /assets
+    app.mount("/assets", StaticFiles(directory=str(_dist / "assets")), name="static-assets")
 
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="static")
+    # Catch-all: serve index.html for any unmatched path (React Router handles client-side routing)
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        return FileResponse(_dist / "index.html")
 else:
     @app.get("/")
     def root():
