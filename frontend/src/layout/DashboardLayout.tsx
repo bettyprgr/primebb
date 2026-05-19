@@ -1,6 +1,5 @@
 import { Outlet } from "react-router-dom";
 import { usePrimeBbWebSocket } from "../api/websocket";
-import { Header } from "./Header";
 import { Sidebar } from "./Sidebar";
 
 export function DashboardLayout() {
@@ -10,7 +9,6 @@ export function DashboardLayout() {
     <div className="app-shell">
       <Sidebar connected={live.connected} />
       <div className="main-shell">
-        <Header />
         <main className="content">
           <Outlet context={live} />
         </main>
