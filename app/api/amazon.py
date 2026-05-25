@@ -17,7 +17,7 @@ def _parse_phone_line(line: str) -> dict | None:
     phone, sms_url = parts[0].strip(), parts[1].strip()
     if not phone or not sms_url:
         return None
-    result: dict = {"phone": phone, "sms_url": sms_url}
+    result: dict = {"phone": phone, "sms_url": sms_url, "status": "pending", "message": None}
     if len(parts) >= 3 and parts[2].strip():
         result["name"] = parts[2].strip()
     if len(parts) >= 4 and parts[3].strip():
